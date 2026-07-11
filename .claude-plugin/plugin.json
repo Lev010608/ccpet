@@ -1,0 +1,15 @@
+{
+  "name": "ccpet",
+  "version": "1.0.0",
+  "description": "独立 Claude Code 桌宠:在自己的透明悬浮窗里实时反映 Claude Code 活动(思考/工具/完成/审批),支持点击跳回会话、卡片交互、换宠物;所有 Claude Code 会话关闭时自动退出。",
+  "author": {
+    "name": "yanwenxuan"
+  },
+  "keywords": [
+    "desktop-pet",
+    "mascot",
+    "notification",
+    "macos",
+    "hooks"
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "name": "ccpet-marketplace",
+  "owner": {
+    "name": "yanwenxuan"
+  },
+  "plugins": [
+    {
+      "name": "ccpet",
+      "source": "./",
+      "description": "独立 Claude Code 桌宠:实时反映活动、点击跳转、审批提示、换宠物、生命周期自动化。",
+      "category": "productivity"
+    }
+  ]
+}

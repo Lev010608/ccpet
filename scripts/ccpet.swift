@@ -871,13 +871,22 @@ final class Daemon: NSObject {
             atPath: (path as NSString).deletingLastPathComponent,
             withIntermediateDirectories: true)
 
-        // Singleton guard: if another daemon already owns the socket, exit.
-        if isDaemonAlive(path) {
-            FileHandle.standardError.write("another ccpet daemon is running; exiting\n".data(using:.utf8)!)
+        // Atomic singleton guard via an exclusive flock. Unlike a socket
+        // check-then-bind (which has a race window where two concurrently-spawned
+        // daemons both pass the check, then fight over the socket and one
+        // flickers/dies), a held flock is atomic: exactly one process can hold
+        // LOCK_EX at a time. The lock fd is intentionally leaked for the process
+        // lifetime — the OS releases it on exit. This fixed "pet appears then
+        // vanishes" on cold start when multiple hooks spawn daemons at once.
+        let lockPath = "\(RUNTIME_DIR)/daemon.lock"
+        let lockFD = open(lockPath, O_CREAT | O_RDWR, 0o644)
+        if lockFD >= 0 && flock(lockFD, LOCK_EX | LOCK_NB) != 0 {
+            FileHandle.standardError.write("another ccpet daemon holds the lock; exiting\n".data(using:.utf8)!)
             exit(0)
         }
-        unlink(path)   // clear stale socket (only after confirming none is alive)
 
+        // We hold the lock — safe to (re)claim the socket. Clear any stale file.
+        unlink(path)
         listenFD = socket(AF_UNIX, SOCK_STREAM, 0)
         guard listenFD >= 0 else { FileHandle.standardError.write("socket() failed\n".data(using:.utf8)!); exit(1) }
 

@@ -51,10 +51,12 @@ import json
 import os
 import shlex
 import socket
+import sqlite3
 import struct
 import subprocess
 import sys
 import time
+import urllib.parse
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -92,6 +94,15 @@ DEFAULT_DEDICATED_ID = "019f421f-ede6-7210-b10f-568241cc1a1c"
 CCPET_SRC       = os.path.join(SCRIPT_DIR, "ccpet.swift")
 CCPET_BIN       = os.path.join(RUNTIME_DIR, "ccpet")
 CCPET_STATE_DIR = os.path.join(RUNTIME_DIR, "state")
+
+# Cursor: bundle id (for `open -b <id> <folder>` window focus) + workspace
+# storage (maps a native-channel session id → workspace folder). Used to
+# distinguish the new "Toggle Agent → Claude Code" native channel from the old
+# anthropic.claude-code extension, and to focus the correct project window when
+# multiple Cursor windows are open. See _cursor_native_session_map / _open_cmd_for.
+CURSOR_BUNDLE_ID  = "com.todesktop.230313mzl4w4u92"
+CURSOR_WS_STORAGE = os.path.expanduser(
+    "~/Library/Application Support/Cursor/User/workspaceStorage")
 
 def _ccpet_sock() -> str:
     t = os.environ.get("TMPDIR", "/tmp").rstrip("/")
@@ -625,6 +636,7 @@ def _latest_user_prompt(path: Optional[str]) -> Optional[str]:
 
 _SURFACE_LABEL = {
     "cursor": "Claude Code · Cursor",
+    "cursor-native": "Claude Code · Cursor (Agent)",
     "vscode": "Claude Code · VS Code",
     "desktop": "Claude Code · Desktop",
     "terminal": "Claude Code · Terminal",
@@ -967,6 +979,63 @@ def _demo() -> int:
 
 # ── Native-target event derivation (surface detection, state, text) ─────────────
 
+def _cursor_native_session_map() -> Dict[str, str]:
+    """Map {native-channel session id → workspace folder} from Cursor's storage.
+
+    Cursor 3.11's "Toggle Agent → Claude Code" NATIVE channel records its
+    currently-active session id per workspace in state.vscdb under the memento
+    key `webviewView.claudeVSCodeSidebarSecondary` (webviewState.sessionID). The
+    OLD anthropic.claude-code EXTENSION channel never writes there. This is the
+    only reliable discriminator between the two (both spawn the same extension
+    binary with identical env / transcripts, so process/env cannot tell them
+    apart — verified with labeled sample sessions).
+
+    Caveat: the memento holds only the CURRENT native session per workspace and
+    is overwritten by later native sessions. So this must be consulted at hook
+    time (session is active → its id is in the memento right now) and the result
+    persisted; do not rely on it being present at jump time.
+    """
+    out: Dict[str, str] = {}
+    try:
+        dbs = glob.glob(os.path.join(CURSOR_WS_STORAGE, "*", "state.vscdb"))
+    except Exception:
+        return out
+    for db in dbs:
+        wsdir = os.path.dirname(db)
+        # workspace folder (for cwd → correct window)
+        folder = ""
+        try:
+            with open(os.path.join(wsdir, "workspace.json")) as fh:
+                wj = json.load(fh)
+            uri = wj.get("folder", "")
+            if uri.startswith("file://"):
+                folder = urllib.parse.unquote(uri[len("file://"):])
+        except Exception:
+            folder = ""
+        # native session id from the secondary-sidebar memento (read-only open)
+        try:
+            conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=0.5)
+            try:
+                row = conn.execute(
+                    "SELECT value FROM ItemTable WHERE key="
+                    "'memento/webviewView.claudeVSCodeSidebarSecondary'").fetchone()
+            finally:
+                conn.close()
+        except Exception:
+            continue
+        if not row or not row[0]:
+            continue
+        try:
+            outer = json.loads(row[0])
+            inner = json.loads(outer.get("webviewState", "{}"))
+            sid = inner.get("sessionID")
+        except Exception:
+            sid = None
+        if sid:
+            out[sid] = folder
+    return out
+
+
 def _detect_surface(data: Dict[str, Any]) -> str:
     """Session origin, for click-to-jump. Discriminators verified from real hook env."""
     env = os.environ
@@ -1013,6 +1082,27 @@ def _record_surface(session_id: str, data: Dict[str, Any]) -> Dict[str, str]:
     entry: Dict[str, Any] = {"surface": surface, "cwd": cwd}
     if surface == "terminal":
         entry["term"] = _terminal_identity()
+    # Distinguish Cursor's native "Toggle Agent → Claude Code" channel from the
+    # old anthropic.claude-code extension. Both look identical to the hook, so we
+    # consult Cursor's workspace storage NOW (while this session is active, its id
+    # is in the secondary-sidebar memento) and persist the verdict. Never downgrade
+    # a previously-recorded cursor-native back to cursor: the memento is overwritten
+    # by later native sessions, so a miss on refresh does not mean "not native".
+    if surface == "cursor":
+        try:
+            prior = _load_config().get("surfaces", {}).get(session_id, {})
+            if prior.get("surface") == "cursor-native":
+                entry["surface"] = "cursor-native"
+                if prior.get("cwd"):
+                    entry["cwd"] = prior["cwd"]
+            else:
+                native = _cursor_native_session_map()
+                if session_id in native:
+                    entry["surface"] = "cursor-native"
+                    if native[session_id]:
+                        entry["cwd"] = native[session_id]
+        except Exception:
+            pass
     try:
         cfg = _load_config()
         surfaces = cfg.get("surfaces", {})
@@ -1102,8 +1192,26 @@ def _open_cmd_for(session_id: str, surface: str, cwd: str,
                   term: Optional[Dict[str, str]] = None) -> str:
     """Shell command that opens/focuses this Claude Code session, per surface."""
     sid = session_id
+    # Focus the correct Cursor PROJECT WINDOW by folder. `open -b <bundleid>
+    # <folder>` reliably raises the existing window bound to that folder (6/6 in
+    # testing; `cursor -r` was only 3/4). This fixes "jumps to the wrong Cursor
+    # instance when multiple windows are open".
+    if surface in ("cursor", "cursor-native") and cwd:
+        focus = f'open -b {CURSOR_BUNDLE_ID} {shlex.quote(cwd)}'
+        if surface == "cursor-native":
+            # New Toggle-Agent channel: the native chat lives inside that window's
+            # agent panel. There is NO Cursor deeplink/CLI to select a specific
+            # native composer, so focusing the right window is the best achievable
+            # (and it avoids the extension deeplink spawning a spurious editor tab).
+            return focus
+        # Old extension channel: focus the window, then resume the session in an
+        # editor tab via the extension's deeplink (its normal behavior).
+        return f'{focus} ; sleep 0.3 ; open "cursor://anthropic.claude-code/open?session={sid}"'
     if surface == "cursor":
         return f'open "cursor://anthropic.claude-code/open?session={sid}"'
+    if surface == "cursor-native":
+        # No cwd to focus by — fall back to just bringing Cursor forward.
+        return f'open -b {CURSOR_BUNDLE_ID}'
     if surface == "vscode":
         return f'open "vscode://anthropic.claude-code/open?session={sid}"'
     if surface == "desktop":
@@ -1146,6 +1254,29 @@ def native_handle(command: str, data: Dict[str, Any]) -> None:
     else:
         info = known
     surface = info.get("surface", "unknown")
+    # Race fix: a native-channel session's first hook (session_start) can fire
+    # BEFORE Cursor writes its id into the secondary-sidebar memento, so it gets
+    # tagged "cursor" and its jump command would spuriously open an extension tab.
+    # On EVERY event, re-check the memento for any still-"cursor" session and
+    # upgrade → "cursor-native" the moment it appears (persisting so it sticks).
+    # This shrinks the misclassification window to at most one event.
+    if surface == "cursor":
+        try:
+            native = _cursor_native_session_map()
+            if session_id in native:
+                surface = "cursor-native"
+                info = dict(info)
+                info["surface"] = "cursor-native"
+                if native[session_id]:
+                    info["cwd"] = native[session_id]
+                try:
+                    cfg2 = _load_config()
+                    cfg2.setdefault("surfaces", {})[session_id] = info
+                    _save_config(cfg2)
+                except Exception:
+                    pass
+        except Exception:
+            pass
     open_cmd = _open_cmd_for(session_id, surface, info.get("cwd", cwd),
                              term=info.get("term"))
     title = _card_title(surface, data)

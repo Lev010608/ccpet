@@ -606,6 +606,7 @@ final class CardWindow: NSObject {
     private let iconView = NSTextField(labelWithString: "")
     private let spinner = NSProgressIndicator()
     private let closeBtn = NSButton()
+    private weak var blurView: NSVisualEffectView?   // for edge-highlight border
     let cardWidth: CGFloat = 300
     private let cardHeight: CGFloat = 72
 
@@ -631,6 +632,7 @@ final class CardWindow: NSObject {
         blur.layer?.cornerRadius = 16
         blur.layer?.masksToBounds = true
         blur.autoresizingMask = [.width, .height]
+        self.blurView = blur
 
         let card = CardView(frame: NSRect(x: 0, y: 0, width: cardWidth, height: cardHeight))
         card.wantsLayer = true
@@ -706,6 +708,22 @@ final class CardWindow: NSObject {
     @objc private func closeClicked() { onClose?() }
 
     private func setHover(_ h: Bool) { closeBtn.isHidden = !h }
+
+    // Edge highlight to draw the eye to the card that just needs attention.
+    // A colored border on the rounded blur layer; cleared with on=false.
+    func setHighlight(_ on: Bool, color: NSColor = .clear) {
+        guard let layer = blurView?.layer else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        if on {
+            layer.borderWidth = 3
+            layer.borderColor = color.cgColor
+        } else {
+            layer.borderWidth = 0
+            layer.borderColor = NSColor.clear.cgColor
+        }
+        CATransaction.commit()
+    }
 
     func setCollapsible(_ on: Bool) { /* collapse control now lives on the pet */ }
 
@@ -840,6 +858,14 @@ final class Daemon: NSObject {
     // reappears on the next prompt (thinking).
     private var dismissedCategory: [String: String] = [:]
     private var stackExpanded = true
+    // Alert-on-transition: remember each session's last alert category so we only
+    // chime/expand/highlight when it ENTERS an alerting state, not on every repeat
+    // event. Per-session highlight-clear timers; a global dedup clock stops a burst
+    // of simultaneous transitions from stacking sounds.
+    private var lastAlertCategory: [String: String] = [:]
+    private var highlightTimers: [String: DispatchSourceTimer] = [:]
+    private var lastSoundAt: Double = 0
+    private let highlightSec = 4.0
     private var idleTimer: DispatchSourceTimer?
     private let idleShutdownSec = 600.0   // self-exit after 10 min with no activity
     private var sweepTimer: DispatchSourceTimer?
@@ -1041,6 +1067,7 @@ final class Daemon: NSObject {
                     "sessions": self.sessionStates,
                     "cards": Array(self.cards.keys),
                     "transcripts": self.sessionTranscript,
+                    "stackExpanded": self.stackExpanded,
                     "claudeCount": self.liveClaudeCodeCount(),
                     "consecutiveZeros": self.consecutiveZeros,
                     "sawClaudeCode": self.sawClaudeCode,
@@ -1123,6 +1150,7 @@ final class Daemon: NSObject {
     private func applyState(session: String, state: String, text: String?,
                             openCmd: String?, title: String?, subtitle: String?,
                             transcriptPath: String? = nil) {
+        let prev = sessionStates[session] ?? "idle"
         // If this session's card was dismissed, clear the dismissal once the
         // session moves to a different state-category (running↔done/etc), so the
         // card reappears exactly on the next meaningful transition.
@@ -1139,8 +1167,90 @@ final class Daemon: NSObject {
         sessionLastTs[session] = Date().timeIntervalSince1970
         recomputeAggregate(retrigger: true)
         updateCards()
+        maybeAlert(session: session, prev: prev, state: state)
         persistToDisk()
         armIdleTimer()
+    }
+
+    // Chime + auto-expand + highlight the card when a session ENTERS an alerting
+    // state (needs-you: attention/waiting; terminal: failed/canceled/review). Only
+    // fires on a transition into a *different* alert category, so repeated events
+    // in the same state don't spam. Called from applyState and sweepStaleRunning.
+    private func maybeAlert(session: String, prev: String, state: String) {
+        let cat = alertCategory(state)
+        guard let cat = cat else {
+            // Left the alerting set → clear memory + any lingering highlight.
+            if lastAlertCategory[session] != nil {
+                lastAlertCategory.removeValue(forKey: session)
+                clearHighlight(session)
+            }
+            return
+        }
+        // Same alert category as last time for this session → not a new alert.
+        if lastAlertCategory[session] == cat { return }
+        lastAlertCategory[session] = cat
+        dbgLog("alert: \(session.prefix(8)) enter=\(state) cat=\(cat) (prev=\(prev)) → chime+expand+highlight")
+
+        // 1) sound (deduped: at most one chime per 1s across all sessions)
+        let now = Date().timeIntervalSince1970
+        if now - lastSoundAt > 1.0 {
+            lastSoundAt = now
+            playAlertSound(for: state)
+        }
+        // 2) auto-expand the stack if collapsed
+        if !stackExpanded {
+            stackExpanded = true
+            layoutCards()
+        }
+        // 3) highlight the triggering card, auto-clear after highlightSec
+        cards[session]?.setHighlight(true, color: highlightColor(for: state))
+        highlightTimers[session]?.cancel()
+        let t = DispatchSource.makeTimerSource(queue: .main)
+        t.schedule(deadline: .now() + highlightSec)
+        t.setEventHandler { [weak self] in self?.clearHighlight(session) }
+        highlightTimers[session] = t
+        t.resume()
+    }
+
+    private func clearHighlight(_ session: String) {
+        highlightTimers[session]?.cancel()
+        highlightTimers.removeValue(forKey: session)
+        cards[session]?.setHighlight(false)
+    }
+
+    // Alerting categories: nil = not alerting (idle/running/thinking/tool).
+    private func alertCategory(_ state: String) -> String? {
+        switch state {
+        case "attention", "waiting":  return "needs-you"
+        case "failed", "error":       return "failed"
+        case "canceled":              return "canceled"
+        case "review", "reply":       return "done"
+        default:                      return nil
+        }
+    }
+
+    private func highlightColor(for state: String) -> NSColor {
+        switch state {
+        case "attention", "waiting": return NSColor.systemBrown.withAlphaComponent(0.95)
+        case "failed", "error":      return NSColor.systemRed.withAlphaComponent(0.95)
+        case "canceled":             return NSColor.systemGray.withAlphaComponent(0.95)
+        case "review", "reply":      return NSColor.systemGreen.withAlphaComponent(0.95)
+        default:                     return .clear
+        }
+    }
+
+    // Soft built-in system sounds (/System/Library/Sounds), differentiated by
+    // category. Falls back silently if a name is unavailable.
+    private func playAlertSound(for state: String) {
+        let name: String
+        switch state {
+        case "attention", "waiting": name = "Tink"      // needs you — gentle but clear
+        case "review", "reply":      name = "Glass"     // done — light chime
+        case "failed", "error":      name = "Sosumi"    // failed — low, soft
+        case "canceled":             name = "Bottle"    // interrupted — neutral pop
+        default:                     name = "Tink"
+        }
+        NSSound(named: NSSound.Name(name))?.play()
     }
 
     // Coarse state grouping for the dismiss/reappear rule. "running" covers the
@@ -1168,6 +1278,9 @@ final class Daemon: NSObject {
         sessionTitle.removeValue(forKey: session)
         sessionSubtitle.removeValue(forKey: session)
         sessionTranscript.removeValue(forKey: session)
+        lastAlertCategory.removeValue(forKey: session)
+        highlightTimers[session]?.cancel()
+        highlightTimers.removeValue(forKey: session)
         sessionLastTs.removeValue(forKey: session)
         dismissedCategory.removeValue(forKey: session)
         cards[session]?.hide()
@@ -1326,6 +1439,9 @@ final class Daemon: NSObject {
             sessionTitle.removeValue(forKey: sid)
             sessionSubtitle.removeValue(forKey: sid)
             sessionTranscript.removeValue(forKey: sid)
+            lastAlertCategory.removeValue(forKey: sid)
+            highlightTimers[sid]?.cancel()
+            highlightTimers.removeValue(forKey: sid)
             sessionLastTs.removeValue(forKey: sid)
             cards[sid]?.hide()
             cards.removeValue(forKey: sid)
@@ -1344,10 +1460,11 @@ final class Daemon: NSObject {
     //      persistent host process, so this only ever adds liveness, never removes.
     // Only when the event clock is stale AND both signals are dead do we cancel.
     // A live signal refreshes the event clock so the card stays "Running".
+    // ... returns the sessions it just transitioned to "canceled" (for alerting).
     @discardableResult
-    private func sweepStaleRunning() -> Bool {
+    private func sweepStaleRunning() -> [String] {
         let now = Date().timeIntervalSince1970
-        var changed = false
+        var canceledNow: [String] = []
         for (sid, ts) in sessionLastTs {
             let st = sessionStates[sid] ?? "idle"
             let active = (st == "running" || st == "thinking" || st == "tool")
@@ -1364,9 +1481,9 @@ final class Daemon: NSObject {
             // window rather than being pruned immediately.
             sessionLastTs[sid] = now
             dbgLog("sweep: \(sid.prefix(8)) → Stopped (no event/transcript/process for \(Int(staleRunningSec))s)")
-            changed = true
+            canceledNow.append(sid)
         }
-        return changed
+        return canceledNow
     }
 
     // Liveness signal 1: the session's transcript file was written recently.
@@ -1407,9 +1524,14 @@ final class Daemon: NSObject {
         t.schedule(deadline: .now() + 15, repeating: 15)
         t.setEventHandler { [weak self] in
             guard let self = self else { return }
-            if self.sweepStaleRunning() {
+            let canceled = self.sweepStaleRunning()
+            if !canceled.isEmpty {
                 self.recomputeAggregate()
                 self.updateCards()
+                // Cards now rebuilt → chime/expand/highlight each interrupted one.
+                for sid in canceled {
+                    self.maybeAlert(session: sid, prev: "running", state: "canceled")
+                }
                 self.persistToDisk()
             }
             self.checkClaudeCodeAlive()

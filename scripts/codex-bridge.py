@@ -1060,6 +1060,41 @@ def _detect_surface(data: Dict[str, Any]) -> str:
     return ep or "unknown"
 
 
+def _current_tty() -> str:
+    """The controlling tty (e.g. /dev/ttys003) of the terminal running this hook.
+
+    Terminal.app exposes each tab's `tty`, so capturing it lets us focus the
+    exact original tab on click (instead of opening a new one). The hook is a
+    child of the `claude` process; walk up the ppid chain until a process with a
+    real tty is found. Returns "" for editor/desktop sessions (no tty).
+    """
+    def tty_of(pid: int) -> str:
+        try:
+            out = subprocess.check_output(["ps", "-o", "tty=", "-p", str(pid)],
+                                          stderr=subprocess.DEVNULL).decode().strip()
+        except Exception:
+            return ""
+        # ps prints e.g. "ttys003" (no /dev/) for a real tty, "??" for none.
+        return out if out and out != "??" else ""
+
+    def ppid_of(pid: int) -> int:
+        try:
+            return int(subprocess.check_output(["ps", "-o", "ppid=", "-p", str(pid)],
+                                               stderr=subprocess.DEVNULL).decode().strip())
+        except Exception:
+            return 0
+
+    pid = os.getpid()
+    for _ in range(8):
+        t = tty_of(pid)
+        if t:
+            return t if t.startswith("/dev/") else f"/dev/{t}"
+        pid = ppid_of(pid)
+        if pid <= 1:
+            break
+    return ""
+
+
 def _terminal_identity() -> Dict[str, str]:
     """Capture which terminal window/pane this hook runs in (for refocus)."""
     env = os.environ
@@ -1072,6 +1107,10 @@ def _terminal_identity() -> Dict[str, str]:
         v = env.get(key)
         if v:
             info[key.lower()] = v
+    # tty enables precise Terminal.app tab focus (Terminal exposes `tty` per tab).
+    tty = _current_tty()
+    if tty:
+        info["tty"] = tty
     return info
 
 
@@ -1149,6 +1188,36 @@ def _iterm_focus_cmd(guid: str, sid: str, cwd: str) -> str:
     focus = "osascript -e " + shlex.quote(script)
     fallback = _terminal_new_tab_cmd(sid, cwd)
     # `[ "$(...)" = ok ] || fallback`: only resume anew when focus didn't land.
+    return f'[ "$({focus} 2>/dev/null)" = "ok" ] || ( {fallback} )'
+
+
+def _terminal_app_focus_cmd(tty: str, sid: str, cwd: str) -> str:
+    """Focus Terminal.app's original tab by its tty; fall back to a new tab.
+
+    Terminal.app exposes `tty` on every tab, so we can select the exact tab whose
+    tty matches the session's controlling terminal (captured at hook time). Unlike
+    iTerm, tab selection here needs no extra Automation grant beyond the one-time
+    "control Terminal" prompt. If the tab was closed (tty gone), fall back to a
+    fresh resume tab.
+    """
+    script = (
+        'tell application "Terminal"\n'
+        f'  set target to "{tty}"\n'
+        '  repeat with w in windows\n'
+        '    repeat with t in tabs of w\n'
+        '      if tty of t is target then\n'
+        '        set selected of t to true\n'
+        '        set index of w to 1\n'
+        '        activate\n'
+        '        return "ok"\n'
+        '      end if\n'
+        '    end repeat\n'
+        '  end repeat\n'
+        '  return "notfound"\n'
+        'end tell'
+    )
+    focus = "osascript -e " + shlex.quote(script)
+    fallback = _terminal_new_tab_cmd(sid, cwd)
     return f'[ "$({focus} 2>/dev/null)" = "ok" ] || ( {fallback} )'
 
 
@@ -1235,7 +1304,13 @@ def _open_cmd_for(session_id: str, surface: str, cwd: str,
         # `id of session`. Focus that exact tab, fall back to a new tab.
         guid = iterm_sid.split(":", 1)[1] if ":" in iterm_sid else iterm_sid
         return _iterm_focus_cmd(guid, sid, cwd)
-    # Terminal.app / unknown → new tab (can't locate the original tab).
+    # Terminal.app (and other ttys): focus the exact tab by its tty. Terminal.app
+    # is TERM_PROGRAM=Apple_Terminal; gate on a captured tty so we only try the
+    # AppleScript focus when we actually have one (else new-tab fallback).
+    tty = term.get("tty", "")
+    if tty and term.get("term_program") in ("Apple_Terminal", "", None):
+        return _terminal_app_focus_cmd(tty, sid, cwd)
+    # Unknown terminal without a usable locator → new tab.
     return _terminal_new_tab_cmd(sid, cwd)
 
 

@@ -105,6 +105,25 @@ func tmpDir() -> String {
 }
 func socketPath() -> String { "\(tmpDir())/ccpet/daemon.sock" }
 
+// ── Diagnostic logging (append-only, ~/.ccpet/debug.log) ─────────────────────
+// OFF by default. Set CCPET_DEBUG=1 in the environment to enable — useful for
+// diagnosing lifecycle issues (why/when the daemon exits, activation/Space
+// events, received messages). Purely observational; never changes behavior.
+let DEBUG_LOG = "\(RUNTIME_DIR)/debug.log"
+let DEBUG_ENABLED = (ProcessInfo.processInfo.environment["CCPET_DEBUG"] ?? "0") == "1"
+func dbgLog(_ msg: String) {
+    guard DEBUG_ENABLED else { return }
+    let pid = ProcessInfo.processInfo.processIdentifier
+    let ts = ISO8601DateFormatter().string(from: Date())
+    let line = "\(ts) [pid \(pid)] \(msg)\n"
+    try? FileManager.default.createDirectory(atPath: RUNTIME_DIR, withIntermediateDirectories: true)
+    if let fh = FileHandle(forWritingAtPath: DEBUG_LOG) {
+        fh.seekToEndOfFile(); fh.write(line.data(using: .utf8)!); try? fh.close()
+    } else {
+        try? line.data(using: .utf8)!.write(to: URL(fileURLWithPath: DEBUG_LOG))
+    }
+}
+
 func loadConfig() -> [String: Any] {
     guard let data = FileManager.default.contents(atPath: CONFIG_PATH),
           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -524,7 +543,7 @@ final class PetWindow: NSObject {
     }
 
     func show() { panel.orderFrontRegardless() }
-    func hidePet() { panel.orderOut(nil) }
+    func hidePet() { dbgLog("hidePet() called — orderOut mascot"); panel.orderOut(nil) }
     func showPet() { panel.orderFrontRegardless() }
 
     func centerOnScreen() {
@@ -867,6 +886,7 @@ final class Daemon: NSObject {
 
     func start() {
         let path = socketPath()
+        dbgLog("start() begin — socket=\(path) TMPDIR=\(tmpDir())")
         try? FileManager.default.createDirectory(
             atPath: (path as NSString).deletingLastPathComponent,
             withIntermediateDirectories: true)
@@ -878,9 +898,16 @@ final class Daemon: NSObject {
         // LOCK_EX at a time. The lock fd is intentionally leaked for the process
         // lifetime — the OS releases it on exit. This fixed "pet appears then
         // vanishes" on cold start when multiple hooks spawn daemons at once.
-        let lockPath = "\(RUNTIME_DIR)/daemon.lock"
+        //
+        // The lock lives under a TMPDIR-derived dir (not RUNTIME_DIR) so that an
+        // isolated test instance (custom TMPDIR) gets its own lock and does not
+        // contend with the user's live daemon. RUNTIME_DIR is derived from the
+        // real home (FileManager.homeDirectoryForCurrentUser ignores $HOME), so
+        // keying the lock off TMPDIR is what actually isolates test runs.
+        let lockPath = "\(tmpDir())/ccpet/daemon.lock"
         let lockFD = open(lockPath, O_CREAT | O_RDWR, 0o644)
         if lockFD >= 0 && flock(lockFD, LOCK_EX | LOCK_NB) != 0 {
+            dbgLog("EXIT reason=flock — another daemon holds the lock")
             FileHandle.standardError.write("another ccpet daemon holds the lock; exiting\n".data(using:.utf8)!)
             exit(0)
         }
@@ -888,7 +915,7 @@ final class Daemon: NSObject {
         // We hold the lock — safe to (re)claim the socket. Clear any stale file.
         unlink(path)
         listenFD = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard listenFD >= 0 else { FileHandle.standardError.write("socket() failed\n".data(using:.utf8)!); exit(1) }
+        guard listenFD >= 0 else { dbgLog("EXIT reason=socket()-failed"); FileHandle.standardError.write("socket() failed\n".data(using:.utf8)!); exit(1) }
 
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
@@ -899,14 +926,52 @@ final class Daemon: NSObject {
         let bindRes = withUnsafePointer(to: &addr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.bind(listenFD, $0, len) }
         }
-        guard bindRes == 0 else { FileHandle.standardError.write("bind() failed\n".data(using:.utf8)!); exit(1) }
-        guard listen(listenFD, 16) == 0 else { FileHandle.standardError.write("listen() failed\n".data(using:.utf8)!); exit(1) }
+        guard bindRes == 0 else { dbgLog("EXIT reason=bind()-failed"); FileHandle.standardError.write("bind() failed\n".data(using:.utf8)!); exit(1) }
+        guard listen(listenFD, 16) == 0 else { dbgLog("EXIT reason=listen()-failed"); FileHandle.standardError.write("listen() failed\n".data(using:.utf8)!); exit(1) }
+
+        dbgLog("start() listening — pet=\(currentPetName())")
 
         restoreFromDisk()
         armIdleTimer()
         armSweepTimer()
+        armActivationDebugObservers()
 
         queue.async { [weak self] in self?.acceptLoop() }
+    }
+
+    // ── Diagnostic: observe app-activation / Space changes ───────────────────
+    // Logs the mascot panel's visibility state at the exact instant another app
+    // is activated or the active Space changes — this is when the user reports
+    // the pet vanishing. Purely observational; does not change window behavior.
+    private func armActivationDebugObservers() {
+        let wsnc = NSWorkspace.shared.notificationCenter
+        wsnc.addObserver(self, selector: #selector(onAppActivated(_:)),
+                         name: NSWorkspace.didActivateApplicationNotification, object: nil)
+        wsnc.addObserver(self, selector: #selector(onSpaceChanged(_:)),
+                         name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
+        dbgLog("activation-debug observers armed")
+    }
+    private func petStateSummary(_ prefix: String) -> String {
+        let p = pet.panel
+        let vis = p.isVisible
+        let onSpace = p.isOnActiveSpace
+        let lvl = p.level.rawValue
+        let scr = p.screen?.frame ?? .zero
+        return "\(prefix) petVisible=\(vis) onActiveSpace=\(onSpace) level=\(lvl) frame=\(p.frame) screen=\(scr) sessions=\(sessionStates.count)"
+    }
+    @objc private func onAppActivated(_ note: Notification) {
+        let app = (note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)
+        let name = app?.localizedName ?? "?"
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            dbgLog(self.petStateSummary("appActivated=\"\(name)\" —"))
+        }
+    }
+    @objc private func onSpaceChanged(_ note: Notification) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            dbgLog(self.petStateSummary("activeSpaceChanged —"))
+        }
     }
 
     private func acceptLoop() {
@@ -920,6 +985,12 @@ final class Daemon: NSObject {
     }
 
     private func handleClient(_ fd: Int32) {
+        // Belt-and-suspenders alongside the process-wide SIG_IGN: also ask the
+        // socket itself not to raise SIGPIPE, so a write to a peer that already
+        // closed returns EPIPE instead of signalling. (SIG_IGN already covers
+        // this; keeping both is cheap and explicit.)
+        var on: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
         var buf = [UInt8](repeating: 0, count: 65536)
         var acc = Data()
         while true {
@@ -941,9 +1012,54 @@ final class Daemon: NSObject {
     private func handleLine(_ data: Data) -> Data? {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let type = obj["type"] as? String else { return nil }
+        if type != "ping" && type != "debug_status" {
+            dbgLog("recv line type=\(type) session=\(obj["session"] as? String ?? "-") state=\(obj["state"] as? String ?? "-")")
+        }
         switch type {
         case "ping":
             return "{\"type\":\"pong\"}\n".data(using: .utf8)
+        case "debug_status":
+            // Synchronous snapshot of pet visibility + runtime for automated QA.
+            let sem = DispatchSemaphore(value: 0)
+            var payload: [String: Any] = [:]
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { sem.signal(); return }
+                let p = self.pet.panel
+                payload = [
+                    "type": "debug_status",
+                    "petVisible": p.isVisible,
+                    "onActiveSpace": p.isOnActiveSpace,
+                    "level": p.level.rawValue,
+                    "alpha": p.alphaValue,
+                    "frame": ["x": p.frame.origin.x, "y": p.frame.origin.y,
+                              "w": p.frame.size.width, "h": p.frame.size.height],
+                    "sessions": self.sessionStates,
+                    "cards": Array(self.cards.keys),
+                    "claudeCount": self.liveClaudeCodeCount(),
+                    "consecutiveZeros": self.consecutiveZeros,
+                    "sawClaudeCode": self.sawClaudeCode,
+                    "pid": ProcessInfo.processInfo.processIdentifier,
+                ]
+                sem.signal()
+            }
+            _ = sem.wait(timeout: .now() + 2)
+            let d = (try? JSONSerialization.data(withJSONObject: payload)) ?? Data("{}".utf8)
+            return d + Data("\n".utf8)
+        case "debug_simulate_jump":
+            // Run openSession for a given session id, to reproduce a card click
+            // without the user physically clicking. Logs pet state around it.
+            if let sid = obj["session"] as? String {
+                dbgLog("debug_simulate_jump session=\(sid)")
+                DispatchQueue.main.async { [weak self] in
+                    guard let self = self else { return }
+                    dbgLog(self.petStateSummary("pre-jump —"))
+                    self.openSession(sid)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                        dbgLog(self.petStateSummary("post-jump(+1.5s) —"))
+                    }
+                }
+            }
+            return "{\"type\":\"ok\"}\n".data(using: .utf8)
         case "switch_pet":
             if let pet = obj["pet"] as? String {
                 DispatchQueue.main.async { [weak self] in
@@ -957,17 +1073,20 @@ final class Daemon: NSObject {
             }
             return nil
         case "hide":
+            dbgLog("recv msg=hide")
             DispatchQueue.main.async { [weak self] in
                 self?.pet.hidePet()
                 for (_, c) in self?.cards ?? [:] { c.hide() }
             }
             return nil
         case "show":
+            dbgLog("recv msg=show")
             DispatchQueue.main.async { [weak self] in
                 self?.pet.showPet(); self?.layoutCards()
             }
             return nil
         case "quit":
+            dbgLog("recv msg=quit — EXIT reason=quit-message")
             DispatchQueue.main.async { NSApp.terminate(nil) }
             return nil
         case "state":
@@ -1260,14 +1379,17 @@ final class Daemon: NSObject {
     private func checkClaudeCodeAlive() {
         let n = liveClaudeCodeCount()
         if n > 0 {
+            if consecutiveZeros > 0 { dbgLog("watchdog: claude count back to \(n), reset zeros (was \(consecutiveZeros))") }
             sawClaudeCode = true
             consecutiveZeros = 0
             return
         }
         guard sawClaudeCode else { return }
         consecutiveZeros += 1
+        dbgLog("watchdog: claude count=0, consecutiveZeros=\(consecutiveZeros)/\(zeroReadingsToQuit)")
         if consecutiveZeros >= zeroReadingsToQuit {
             // Sustained absence of any Claude Code CLI → tear down (like "quit").
+            dbgLog("EXIT reason=watchdog — \(consecutiveZeros) consecutive zero readings of `claude` procs")
             exit(0)
         }
     }
@@ -1351,7 +1473,12 @@ final class Daemon: NSObject {
         t.setEventHandler {
             // Exit only if nothing is active.
             let active = self.sessionStates.values.contains { priority($0) > 0 }
-            if !active { exit(0) }
+            if !active {
+                dbgLog("EXIT reason=idle-timer — \(self.idleShutdownSec)s with no active session (sessions=\(self.sessionStates.count))")
+                exit(0)
+            } else {
+                dbgLog("idle-timer fired but sessions still active (\(self.sessionStates.count)); not exiting")
+            }
         }
         idleTimer = t
         t.resume()
@@ -1364,6 +1491,14 @@ let args = CommandLine.arguments
 if args.contains("--selftest") {
     runSelftest()
 } else {
+    // CRITICAL: ignore SIGPIPE process-wide. The daemon writes replies (pong,
+    // debug_status, ok) back to client sockets, but the bridge's hook processes
+    // connect→send→close very quickly, so a reply frequently races a peer that
+    // has already closed. The default SIGPIPE disposition TERMINATES the process
+    // — this was the true cause of the pet "randomly disappearing" (the write of
+    // a reply to an already-closed hook connection killed the daemon). With
+    // SIG_IGN, the failed write simply returns -1/EPIPE and the daemon lives.
+    signal(SIGPIPE, SIG_IGN)
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
     let pet = PetWindow()

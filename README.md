@@ -1,6 +1,6 @@
 # ccpet — Claude Code 桌宠插件
 
-一个**独立的** macOS 桌面宠物:在自己的透明悬浮窗里实时反映 Claude Code 的活动。不依赖 Codex/ChatGPT 运行(只借用它的宠物精灵图),为 Claude Code 全套适配。
+一个**独立的** macOS 桌面宠物:在自己的透明悬浮窗里实时反映 Claude Code 的活动。不依赖 Codex/ChatGPT 运行(宠物精灵图可来自 [petdex.dev](https://petdex.dev) 或 Codex),为 Claude Code 全套适配。
 
 ## 它能做什么
 
@@ -8,7 +8,7 @@
 - **点击卡片跳回会话**:终端(iTerm 精确聚焦原 tab)、Cursor、VS Code、Claude Desktop(Cowork)四端都能跳回正确的活动会话。
 - **卡片交互**:悬停出 ✕ 关闭(智能重现);多会话堆叠;拖拽移动;右下角手柄平滑缩放。
 - **生命周期自动化**:任意端开会话 → 桌宠自动出现(用上次记住的宠物);所有 Claude Code 会话关闭 → 桌宠自动退出。
-- **换宠物**:`/pet use <名字>`,从你的 `~/.codex/pets/` 宠物库里选(27+ 个)。
+- **换宠物**:`/pet use <名字>`,从 `~/.codex/pets/` 和 `~/.petdex/pets/` 的宠物库里选;更多宠物见 [petdex.dev](https://petdex.dev)。
 
 ## 前置依赖
 
@@ -17,9 +17,24 @@
 | **macOS** | 桌宠是原生 AppKit 窗口 | — |
 | **swiftc**(Xcode Command Line Tools) | 首次运行编译桌宠 | `xcode-select --install` |
 | **python3** | hook 脚本 + 控制脚本 | macOS 自带 `/usr/bin/python3` |
-| **宠物精灵图**(`~/.codex/pets/`) | 桌宠的形象资源 | 装 [ChatGPT/Codex](https://openai.com/chatgpt/) 会自动放入;或手动放 `~/.codex/pets/<名字>/spritesheet.webp` |
+| **宠物精灵图** | 桌宠的形象资源 | 见下「宠物来源」 |
+| **Node.js 20+**(可选) | 用 [petdex.dev](https://petdex.dev) 的 CLI 拉宠物图 | https://nodejs.org |
 
-> ⚠️ **宠物图是硬依赖**:没有 `~/.codex/pets/` 里的 spritesheet,桌宠没有形象。装了 ChatGPT 桌面版即可(它自带一批宠物图)。
+### 宠物来源(二选一,不再硬依赖 Codex)
+
+桌宠的形象来自宠物精灵图,支持两个来源,任选其一:
+
+- **petdex.dev**(推荐,不需要 Codex):用它的 CLI 安装宠物 ——
+  ```bash
+  npx petdex@latest install boba      # 装一个宠物(装进 ~/.petdex/pets 和 ~/.codex/pets)
+  ```
+  逛 https://petdex.dev 挑更多宠物,`npx petdex install <名字>` 安装,再 `/pet use <名字>` 切换。
+  > 运行 `install.sh` 时,如果检测到你**没有任何宠物图**且装了 Node.js 20+,会**自动**帮你拉一个默认宠物 `boba`。
+- **Codex / ChatGPT**:装 [ChatGPT/Codex](https://openai.com/chatgpt/) 会自动在 `~/.codex/pets/` 放一批宠物图。
+
+桌宠会**同时读** `~/.codex/pets/` 和 `~/.petdex/pets/` 两个目录(合并去重),所以两种来源装的宠物都能用、能 `/pet use` 切换。
+
+> ⚠️ 没有任何宠物图时桌宠没有形象。最省事:装了 Node.js 就跑 `npx petdex@latest install boba`(或直接跑 `install.sh` 让它自动拉)。
 
 ## 安装
 

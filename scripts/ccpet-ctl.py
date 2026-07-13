@@ -3,7 +3,7 @@
 ccpet-ctl.py — control the independent Claude Code desktop pet (ccpet).
 
 Usage:
-  ccpet-ctl.py list            # list available pets (personal library ~/.codex/pets)
+  ccpet-ctl.py list            # list available pets (~/.codex/pets + ~/.petdex/pets)
   ccpet-ctl.py use <name>      # switch to pet <name> (fuzzy match)
   ccpet-ctl.py on              # show / wake the pet (spawn daemon if needed)
   ccpet-ctl.py off             # hide the pet
@@ -26,7 +26,10 @@ RUNTIME_DIR = os.path.expanduser("~/.ccpet")
 CONFIG_PATH = os.path.join(RUNTIME_DIR, "config.json")
 CCPET_BIN   = os.path.join(RUNTIME_DIR, "ccpet")
 CCPET_SRC   = os.path.join(SCRIPT_DIR, "ccpet.swift")
-PETS_DIR    = os.path.expanduser("~/.codex/pets")
+# Pet spritesheets: Codex (~/.codex/pets) or petdex.dev CLI (~/.petdex/pets).
+# Read both so pets work without Codex. Same slug: first dir (.codex) wins.
+PETS_DIRS   = [os.path.expanduser("~/.codex/pets"),
+               os.path.expanduser("~/.petdex/pets")]
 
 
 def _sock() -> str:
@@ -88,20 +91,29 @@ def _spawn_daemon() -> None:
 
 
 def _pets() -> list:
-    """List pets in the personal library (dir name + displayName from pet.json)."""
+    """List pets across the candidate libraries (dir name + displayName).
+
+    Merges ~/.codex/pets and ~/.petdex/pets; on a slug collision the first dir
+    (Codex) wins. Only pets that actually have a spritesheet are listed.
+    """
     out = []
-    for pj in sorted(glob.glob(os.path.join(PETS_DIR, "*", "pet.json"))):
-        name = os.path.basename(os.path.dirname(pj))
-        display = name
-        try:
-            with open(pj) as f:
-                display = json.load(f).get("displayName", name)
-        except Exception:
-            pass
-        # Only list pets that actually have a spritesheet.
-        if os.path.exists(os.path.join(os.path.dirname(pj), "spritesheet.webp")):
+    seen = set()
+    for pets_dir in PETS_DIRS:
+        for pj in sorted(glob.glob(os.path.join(pets_dir, "*", "pet.json"))):
+            name = os.path.basename(os.path.dirname(pj))
+            if name in seen:
+                continue
+            if not os.path.exists(os.path.join(os.path.dirname(pj), "spritesheet.webp")):
+                continue
+            display = name
+            try:
+                with open(pj) as f:
+                    display = json.load(f).get("displayName", name)
+            except Exception:
+                pass
+            seen.add(name)
             out.append((name, display))
-    return out
+    return sorted(out, key=lambda t: t[0])
 
 
 def cmd_list() -> None:
@@ -109,7 +121,7 @@ def cmd_list() -> None:
     cur = cfg.get("pet", "spongebob-star")
     pets = _pets()
     print(f"当前宠物: {cur}")
-    print(f"可用宠物 ({len(pets)} 个,来自 ~/.codex/pets):\n")
+    print(f"可用宠物 ({len(pets)} 个,来自 ~/.codex/pets 和 ~/.petdex/pets):\n")
     for name, display in pets:
         mark = " ← 当前" if name == cur else ""
         print(f"  {name:28s} {display}{mark}")

@@ -37,13 +37,41 @@ else
   bad "缺 swiftc —— 运行  xcode-select --install  安装 Command Line Tools"
 fi
 
-# 4. 宠物图资源(~/.codex/pets)
-PETS="$HOME/.codex/pets"
-if [ -d "$PETS" ] && ls "$PETS"/*/spritesheet.webp >/dev/null 2>&1; then
-  n=$(ls -d "$PETS"/*/spritesheet.webp 2>/dev/null | wc -l | tr -d ' ')
-  good "宠物图: $n 个(来自 $PETS)"
+# 4. 宠物图资源(~/.codex/pets 或 ~/.petdex/pets;没有则从 petdex.dev 拉一个)
+have_pets() {
+  ls "$HOME/.codex/pets"/*/spritesheet.webp >/dev/null 2>&1 \
+    || ls "$HOME/.petdex/pets"/*/spritesheet.webp >/dev/null 2>&1
+}
+count_pets() {
+  { ls -d "$HOME/.codex/pets"/*/spritesheet.webp 2>/dev/null;
+    ls -d "$HOME/.petdex/pets"/*/spritesheet.webp 2>/dev/null; } \
+    | sed 's#.*/\([^/]*\)/spritesheet.webp#\1#' | sort -u | wc -l | tr -d ' '
+}
+
+if have_pets; then
+  good "宠物图: $(count_pets) 个(来自 ~/.codex/pets / ~/.petdex/pets)"
 else
-  bad "没找到宠物图 —— 需装 ChatGPT/Codex(它会在 ~/.codex/pets/ 放宠物 spritesheet),或手动放入 ~/.codex/pets/<名字>/spritesheet.webp"
+  # 没有任何宠物图 —— 尝试用 petdex.dev 的 CLI 自动拉一个默认宠物(boba)。
+  node_ok=0
+  if command -v node >/dev/null 2>&1; then
+    major="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
+    [ "${major:-0}" -ge 20 ] 2>/dev/null && node_ok=1
+  fi
+  if [ "$node_ok" -eq 1 ]; then
+    say "  · 没找到宠物图 —— 正在从 petdex.dev 拉取默认宠物 boba(npx petdex install boba)…"
+    if npx -y petdex@latest install boba >/dev/null 2>&1 && have_pets; then
+      good "宠物图: 已从 petdex.dev 安装默认宠物 boba"
+      say "    更多宠物见 https://petdex.dev —— 用  npx petdex install <名字>  安装,再  /pet use <名字>  切换"
+    else
+      bad "从 petdex.dev 自动拉取失败(可能无网络)。可稍后手动运行:  npx petdex@latest install boba"
+      say "    或从 https://petdex.dev 挑宠物;也可装 Codex/ChatGPT(自带 ~/.codex/pets 宠物图)"
+    fi
+  else
+    bad "没找到宠物图,且未装 Node.js 20+(petdex 需要)"
+    say "    方式一:装 Node.js 20+ 后运行  npx petdex@latest install boba (从 https://petdex.dev 拉宠物)"
+    say "    方式二:装 Codex/ChatGPT(自带 ~/.codex/pets 宠物图)"
+    say "    方式三:手动放宠物图到 ~/.petdex/pets/<名字>/spritesheet.webp"
+  fi
 fi
 
 say ""

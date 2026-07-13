@@ -97,7 +97,10 @@ let HOME = FileManager.default.homeDirectoryForCurrentUser.path
 // RUNTIME_DIR = ~/.ccpet. The daemon binary itself is compiled here too.
 let RUNTIME_DIR = "\(HOME)/.ccpet"
 let CONFIG_PATH = "\(RUNTIME_DIR)/config.json"
-let PETS_DIR = "\(HOME)/.codex/pets"
+// Pet spritesheets come from either Codex (~/.codex/pets) or petdex.dev's CLI
+// (`npx petdex install <slug>`, which writes ~/.petdex/pets AND ~/.codex/pets).
+// Read both so the pet works without Codex installed. Same slug: .codex wins.
+let PETS_DIRS = ["\(HOME)/.codex/pets", "\(HOME)/.petdex/pets"]
 
 func tmpDir() -> String {
     let t = ProcessInfo.processInfo.environment["TMPDIR"] ?? "/tmp"
@@ -137,7 +140,15 @@ func currentPetName() -> String {
     return "spongebob-star"
 }
 
-func spritesheetPath(pet: String) -> String { "\(PETS_DIR)/\(pet)/spritesheet.webp" }
+func spritesheetPath(pet: String) -> String {
+    // First existing <dir>/<pet>/spritesheet.webp across the candidate dirs.
+    for dir in PETS_DIRS {
+        let p = "\(dir)/\(pet)/spritesheet.webp"
+        if FileManager.default.fileExists(atPath: p) { return p }
+    }
+    // Fall back to the first candidate (load() will just fail gracefully).
+    return "\(PETS_DIRS[0])/\(pet)/spritesheet.webp"
+}
 
 // ── Sprite frame cache ──────────────────────────────────────────────────────
 

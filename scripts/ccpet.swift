@@ -1247,15 +1247,27 @@ final class Daemon: NSObject {
     // Exit when the last Claude Code CLI instance is gone. We only start
     // watching once at least one instance has been seen — otherwise a pet woken
     // manually (`/pet on`) before any session exists would quit immediately.
+    //
+    // IMPORTANT: Claude Code Desktop/Cursor/VSCode spawn the `claude` CLI
+    // on-demand (per turn), so the process count briefly hits 0 *between* turns
+    // even though the app is still open. A single zero reading must NOT trigger
+    // shutdown — we require several CONSECUTIVE zeros (debounce), so only truly
+    // closing everything (a sustained zero) tears the pet down. This fixes the
+    // "pet keeps disappearing" false-positive.
     private var sawClaudeCode = false
+    private var consecutiveZeros = 0
+    private let zeroReadingsToQuit = 4   // 4 × 15s sweep ≈ 60s sustained absence
     private func checkClaudeCodeAlive() {
         let n = liveClaudeCodeCount()
         if n > 0 {
             sawClaudeCode = true
+            consecutiveZeros = 0
             return
         }
-        if sawClaudeCode {
-            // Last Claude Code closed → tear down (matches "quit").
+        guard sawClaudeCode else { return }
+        consecutiveZeros += 1
+        if consecutiveZeros >= zeroReadingsToQuit {
+            // Sustained absence of any Claude Code CLI → tear down (like "quit").
             exit(0)
         }
     }
@@ -1289,7 +1301,12 @@ final class Daemon: NSObject {
     private var stateDir: String { "\(RUNTIME_DIR)/state" }
     private func persistToDisk() {
         try? FileManager.default.createDirectory(atPath: stateDir, withIntermediateDirectories: true)
-        let obj: [String: Any] = ["sessions": sessionStates]
+        // Persist timestamps alongside states so a restart can tell a genuine
+        // crash-respawn (sessions still fresh) from a close-all-then-reopen
+        // (old sessions gone stale, must NOT be resurrected as ghost cards).
+        var ts: [String: Double] = [:]
+        for k in sessionStates.keys { ts[k] = sessionLastTs[k] ?? Date().timeIntervalSince1970 }
+        let obj: [String: Any] = ["sessions": sessionStates, "ts": ts]
         if let d = try? JSONSerialization.data(withJSONObject: obj) {
             try? d.write(to: URL(fileURLWithPath: "\(stateDir)/aggregate.json"))
         }
@@ -1299,11 +1316,31 @@ final class Daemon: NSObject {
         guard let d = FileManager.default.contents(atPath: p),
               let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
               let s = obj["sessions"] as? [String: String] else { return }
-        sessionStates = s
-        // Restored sessions get a fresh timestamp so TTL still applies.
+        let savedTs = (obj["ts"] as? [String: Double]) ?? [:]
         let now = Date().timeIntervalSince1970
-        for k in s.keys { sessionLastTs[k] = now }
-        DispatchQueue.main.async { [weak self] in self?.recomputeAggregate() }
+        // Only restore sessions that were active VERY recently. A daemon that
+        // crashed and respawned does so within seconds, so its sessions are still
+        // fresh and worth restoring for mascot continuity. But when the user
+        // closed all of Claude Code and reopened minutes/hours later, the
+        // persisted sessions are long dead — restoring them would show ghost
+        // "Ready" cards and force a manual collapse-toggle to clear. A tight
+        // window (not the full 15-min session TTL) reliably distinguishes the
+        // two. Terminal states (review/reply/canceled/idle) are also dropped:
+        // their card should only appear from a live event, not resurrected.
+        let restoreFreshnessSec = 45.0
+        var fresh: [String: String] = [:]
+        for (k, state) in s {
+            let age = now - (savedTs[k] ?? 0)
+            if age > restoreFreshnessSec { continue }
+            if state == "review" || state == "reply" || state == "canceled" || state == "idle" { continue }
+            fresh[k] = state
+        }
+        sessionStates = fresh
+        for k in fresh.keys { sessionLastTs[k] = savedTs[k] ?? now }
+        DispatchQueue.main.async { [weak self] in
+            self?.recomputeAggregate()
+            self?.updateCards()
+        }
     }
 
     // ── Idle self-shutdown ──────────────────────────────────────────────────

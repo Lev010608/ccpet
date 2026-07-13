@@ -1,5 +1,6 @@
 {
   "name": "ccpet-marketplace",
+  "description": "Claude Code 桌宠插件 —— 独立 macOS 桌宠,实时反映活动、点击跳转、换宠物。",
   "owner": {
     "name": "yanwenxuan"
   },

@@ -789,7 +789,7 @@ def _ccpet_persist(session_id: str, state: str, text: Optional[str]) -> None:
 
 def native_emit(session_id: str, state: str, *, text: Optional[str] = None,
                 cwd: str = "", surface: str = "", open_cmd: str = "",
-                title: str = "", subtitle: str = "") -> None:
+                title: str = "", subtitle: str = "", transcript_path: str = "") -> None:
     """Push a state event to the independent pet; ensure the daemon is up."""
     msg = {"type": "state", "session": session_id, "state": state}
     if text:
@@ -804,6 +804,11 @@ def native_emit(session_id: str, state: str, *, text: Optional[str] = None,
         msg["title"] = title[:120]
     if subtitle:
         msg["subtitle"] = subtitle[:60]
+    if transcript_path:
+        # The daemon uses this file's mtime as a liveness signal: a long turn
+        # (generation/thinking/one slow tool) fires no hooks but keeps appending
+        # to the transcript, so it must NOT be swept to "Stopped".
+        msg["transcript_path"] = transcript_path
     if not _ccpet_send(msg):
         _ccpet_persist(session_id, state, text)
         _ccpet_ensure_daemon()
@@ -1319,6 +1324,15 @@ def native_handle(command: str, data: Dict[str, Any]) -> None:
     session_id = data.get("session_id") or "default"
     cwd = _session_cwd(data)
 
+    # Fast path for session_end: the session is closing, so all the surface /
+    # jump-command / transcript / Cursor-vscdb work below is pointless — and the
+    # vscdb reads in _cursor_native_session_map() can be slow while Cursor is
+    # shutting down, which shows up as Cursor's "Composer Session End Hooks …
+    # taking a bit longer" dialog. Just tell the daemon and return immediately.
+    if command == "session_end":
+        _ccpet_send({"type": "session_end", "session": session_id})
+        return
+
     # Resolve this session's surface + click-to-open command. Record on first
     # sighting of the session (via any hook) so already-running sessions also get
     # a surface, and refresh on prompt/start when the full env is freshest.
@@ -1357,9 +1371,12 @@ def native_handle(command: str, data: Dict[str, Any]) -> None:
     title = _card_title(surface, data)
     subtitle = _card_subtitle(surface)
 
+    tpath = _transcript_path(data) or ""
+
     def emit(state, text=None):
         native_emit(session_id, state, text=text, cwd=cwd,
-                    surface=surface, open_cmd=open_cmd, title=title, subtitle=subtitle)
+                    surface=surface, open_cmd=open_cmd, title=title, subtitle=subtitle,
+                    transcript_path=tpath)
 
     if command == "user_prompt_submit":
         emit("thinking")
@@ -1396,8 +1413,7 @@ def native_handle(command: str, data: Dict[str, Any]) -> None:
     elif command == "stop":
         text = _latest_assistant_text(_transcript_path(data))
         emit("review", text or "")
-    elif command == "session_end":
-        _ccpet_send({"type": "session_end", "session": session_id})
+    # session_end is handled by the fast path at the top of native_handle.
 
 
 def _attention_label(tool: str, tool_input: Dict[str, Any]) -> Optional[str]:

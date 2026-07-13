@@ -832,6 +832,7 @@ final class Daemon: NSObject {
     private var sessionText: [String: String] = [:]     // latest activity/reply text
     private var sessionTitle: [String: String] = [:]     // card title (user question)
     private var sessionSubtitle: [String: String] = [:]  // card subtitle (surface)
+    private var sessionTranscript: [String: String] = [:]  // transcript path (liveness signal)
     private var cards: [String: CardWindow] = [:]        // one notification card per session
     // Sessions the user dismissed (✕), with the state-category at dismissal.
     // The card reappears once the session moves to a different category:
@@ -842,10 +843,14 @@ final class Daemon: NSObject {
     private var idleTimer: DispatchSourceTimer?
     private let idleShutdownSec = 600.0   // self-exit after 10 min with no activity
     private var sweepTimer: DispatchSourceTimer?
-    // A running/thinking session with no new event for this long is treated as
-    // interrupted/canceled (Claude Code fires no hook on user interrupt), so the
-    // card doesn't sit stuck on "Running" forever.
-    private let staleRunningSec = 90.0
+    // A running/thinking session with no new event for this long, AND no other
+    // liveness signal (transcript still being written, or a live `--resume`
+    // process), is treated as interrupted/canceled so the card doesn't sit stuck
+    // on "Running". Relaxed from 90s: the running keep-alive only fires on tool
+    // calls, so a long generation / thinking / single slow tool starves it; the
+    // extra liveness signals (see sweepStaleRunning) catch those, and this longer
+    // window is just the final fallback when no signal is available.
+    private let staleRunningSec = 300.0
 
     init(pet: PetWindow) {
         self.pet = pet
@@ -1035,6 +1040,7 @@ final class Daemon: NSObject {
                               "w": p.frame.size.width, "h": p.frame.size.height],
                     "sessions": self.sessionStates,
                     "cards": Array(self.cards.keys),
+                    "transcripts": self.sessionTranscript,
                     "claudeCount": self.liveClaudeCodeCount(),
                     "consecutiveZeros": self.consecutiveZeros,
                     "sawClaudeCode": self.sawClaudeCode,
@@ -1096,9 +1102,11 @@ final class Daemon: NSObject {
             let openCmd = obj["open_cmd"] as? String
             let title = obj["title"] as? String
             let subtitle = obj["subtitle"] as? String
+            let transcriptPath = obj["transcript_path"] as? String
             DispatchQueue.main.async { [weak self] in
                 self?.applyState(session: session, state: state, text: text,
-                                 openCmd: openCmd, title: title, subtitle: subtitle)
+                                 openCmd: openCmd, title: title, subtitle: subtitle,
+                                 transcriptPath: transcriptPath)
             }
             return nil
         case "session_end":
@@ -1113,7 +1121,8 @@ final class Daemon: NSObject {
     }
 
     private func applyState(session: String, state: String, text: String?,
-                            openCmd: String?, title: String?, subtitle: String?) {
+                            openCmd: String?, title: String?, subtitle: String?,
+                            transcriptPath: String? = nil) {
         // If this session's card was dismissed, clear the dismissal once the
         // session moves to a different state-category (running↔done/etc), so the
         // card reappears exactly on the next meaningful transition.
@@ -1126,6 +1135,7 @@ final class Daemon: NSObject {
         if let t = text, !t.isEmpty { sessionText[session] = t }
         if let ti = title, !ti.isEmpty { sessionTitle[session] = ti }
         if let st = subtitle, !st.isEmpty { sessionSubtitle[session] = st }
+        if let tp = transcriptPath, !tp.isEmpty { sessionTranscript[session] = tp }
         sessionLastTs[session] = Date().timeIntervalSince1970
         recomputeAggregate(retrigger: true)
         updateCards()
@@ -1157,6 +1167,7 @@ final class Daemon: NSObject {
         sessionText.removeValue(forKey: session)
         sessionTitle.removeValue(forKey: session)
         sessionSubtitle.removeValue(forKey: session)
+        sessionTranscript.removeValue(forKey: session)
         sessionLastTs.removeValue(forKey: session)
         dismissedCategory.removeValue(forKey: session)
         cards[session]?.hide()
@@ -1314,16 +1325,25 @@ final class Daemon: NSObject {
             sessionText.removeValue(forKey: sid)
             sessionTitle.removeValue(forKey: sid)
             sessionSubtitle.removeValue(forKey: sid)
+            sessionTranscript.removeValue(forKey: sid)
             sessionLastTs.removeValue(forKey: sid)
             cards[sid]?.hide()
             cards.removeValue(forKey: sid)
         }
     }
 
-    // A running/thinking session that goes silent past staleRunningSec was most
-    // likely interrupted by the user (no hook fires on interrupt). Transition it
-    // to the terminal `canceled` state so the card shows "Stopped" (gray ⛔)
-    // instead of sitting stuck on "Running". Returns true if anything changed.
+    // A running/thinking session that goes silent past staleRunningSec MIGHT be
+    // interrupted (Claude Code fires no hook on interrupt) — but it might also
+    // just be mid-generation, thinking, or running one slow tool, none of which
+    // emit hooks. So before declaring it "Stopped", check two liveness signals:
+    //   1. transcript mtime — the .jsonl keeps getting appended during a live
+    //      turn (assistant messages / tool results / thinking), across ALL
+    //      surfaces, independent of tool-call frequency.
+    //   2. a live `--resume <sid>` claude process — for turn-scoped surfaces
+    //      (Desktop / terminal) the CLI exits when the turn ends; editors keep a
+    //      persistent host process, so this only ever adds liveness, never removes.
+    // Only when the event clock is stale AND both signals are dead do we cancel.
+    // A live signal refreshes the event clock so the card stays "Running".
     @discardableResult
     private func sweepStaleRunning() -> Bool {
         let now = Date().timeIntervalSince1970
@@ -1331,16 +1351,51 @@ final class Daemon: NSObject {
         for (sid, ts) in sessionLastTs {
             let st = sessionStates[sid] ?? "idle"
             let active = (st == "running" || st == "thinking" || st == "tool")
-            if active && now - ts > staleRunningSec {
-                sessionStates[sid] = "canceled"
-                sessionText[sid] = "Stopped"
-                // Bump the timestamp so the canceled card lives out its own TTL
-                // window rather than being pruned immediately.
+            guard active && now - ts > staleRunningSec else { continue }
+            if transcriptFresh(sid, now: now) || hasLiveResumeProcess(sid) {
+                // Still working — refresh the event clock, keep it "Running".
                 sessionLastTs[sid] = now
-                changed = true
+                dbgLog("sweep: \(sid.prefix(8)) stale by clock but liveness signal active → keep running")
+                continue
             }
+            sessionStates[sid] = "canceled"
+            sessionText[sid] = "Stopped"
+            // Bump the timestamp so the canceled card lives out its own TTL
+            // window rather than being pruned immediately.
+            sessionLastTs[sid] = now
+            dbgLog("sweep: \(sid.prefix(8)) → Stopped (no event/transcript/process for \(Int(staleRunningSec))s)")
+            changed = true
         }
         return changed
+    }
+
+    // Liveness signal 1: the session's transcript file was written recently.
+    private func transcriptFresh(_ sid: String, now: Double) -> Bool {
+        guard let path = sessionTranscript[sid] else { return false }
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+              let mtime = (attrs[.modificationDate] as? Date)?.timeIntervalSince1970
+        else { return false }
+        return now - mtime <= staleRunningSec
+    }
+
+    // Liveness signal 2: a live claude process resuming this exact session id.
+    // Turn-scoped surfaces (Desktop/terminal) launch `claude … --resume <sid>`
+    // and exit when the turn ends; a match means the turn is still running.
+    private func hasLiveResumeProcess(_ sid: String) -> Bool {
+        let p = Process()
+        p.launchPath = "/bin/ps"
+        p.arguments = ["-axo", "command="]
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = Pipe()
+        do { try p.run() } catch { return false }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        guard let out = String(data: data, encoding: .utf8) else { return false }
+        for line in out.split(separator: "\n") {
+            if line.contains("--resume") && line.contains(sid) { return true }
+        }
+        return false
     }
 
     // Periodic sweep: interrupts leave no hook, so we poll to catch stuck

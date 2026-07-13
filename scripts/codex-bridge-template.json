@@ -17,7 +17,7 @@
      {
       "params": {
        "threadId": "019f41db-eb69-7883-bc37-729d4e73ff0a",
-       "cwd": "/Users/yanwenxuan.5/Documents/Codex/2026-07-08/new-chat-5",
+       "cwd": "/Users/example/workspace",
        "approvalPolicy": "on-request",
        "approvalsReviewer": "auto_review",
        "permissions": ":workspace",
@@ -28,7 +28,7 @@
        "input": [
         {
          "type": "text",
-         "text": "\u5217\u51fa\u5f53\u524d\u76ee\u5f55\u7684\u6587\u4ef6\n",
+         "text": "list files in the current directory\n",
          "text_elements": []
         }
        ],
@@ -37,7 +37,7 @@
        "collaborationMode": {
         "mode": "default",
         "settings": {
-         "model": "GLM-5.2",
+         "model": "model",
          "reasoning_effort": "high",
          "developer_instructions": null
         }
@@ -46,9 +46,9 @@
        "sandboxPolicy": {
         "type": "workspaceWrite",
         "writableRoots": [
-         "/Users/yanwenxuan.5/Documents/Codex",
+         "/Users/example/workspace",
          "/private/tmp",
-         "/private/var/folders/fj/tjl67r5n27l91gj599tzy3gm0000gp/T"
+         "/private/var/folders/xx/00000000000000000000000000/T"
         ],
         "networkAccess": false,
         "excludeTmpdirEnvVar": false,
@@ -56,8 +56,8 @@
        },
        "useAppServerPermissionDefault": false,
        "runtimeWorkspaceRoots": [
-        "/Users/yanwenxuan.5/Documents/Codex",
-        "/Users/yanwenxuan.5/Documents/Codex/2026-07-08/new-chat-5"
+        "/Users/example/workspace",
+        "/Users/example/workspace"
        ],
        "summary": "none",
        "personality": "friendly",
@@ -78,7 +78,7 @@
         "content": [
          {
           "type": "text",
-          "text": "\u5217\u51fa\u5f53\u524d\u76ee\u5f55\u7684\u6587\u4ef6\n",
+          "text": "list files in the current directory\n",
           "text_elements": []
          }
         ]
@@ -87,7 +87,7 @@
         "type": "commandExecution",
         "id": "call_96b6784957344f0ab6ce4f1f",
         "command": "/bin/zsh -lc 'ls -la'",
-        "cwd": "/Users/yanwenxuan.5/Documents/Codex/2026-07-08/new-chat-5",
+        "cwd": "/Users/example/workspace",
         "processId": "79849",
         "source": "unifiedExecStartup",
         "status": "completed",
@@ -98,28 +98,28 @@
           "path": null
          }
         ],
-        "aggregatedOutput": "total 0\ndrwxr-xr-x@  4 yanwenxuan.5  staff  128 Jul  8 21:12 .\ndrwxr-xr-x@ 16 yanwenxuan.5  staff  512 Jul  8 21:12 ..\ndrwxr-xr-x@  2 yanwenxuan.5  staff   64 Jul  8 21:12 outputs\ndrwxr-xr-x@  2 yanwenxuan.5  staff   64 Jul  8 21:12 work\n",
+        "aggregatedOutput": "total 0\ndrwxr-xr-x@  4 example  staff  128 Jan  1 00:00 .\ndrwxr-xr-x@ 16 example  staff  512 Jan  1 00:00 ..\ndrwxr-xr-x@  2 example  staff   64 Jan  1 00:00 outputs\ndrwxr-xr-x@  2 example  staff   64 Jan  1 00:00 work\n",
         "exitCode": 0,
         "durationMs": 0
        },
        {
         "type": "agentMessage",
         "id": "resp_202607082112442682ada061c347ea_msg",
-        "text": "\u5f53\u524d\u76ee\u5f55 `/Users/yanwenxuan.5/Documents/Codex/2026-07-08/new-chat-5` \u4e0b\u6709\u4e24\u4e2a\u6587\u4ef6\u5939\uff1a\n\n- `outputs/` \u2014 \u7528\u4e8e\u5b58\u653e\u9762\u5411\u7528\u6237\u7684\u4ea4\u4ed8\u7269\n- `work/` \u2014 \u7528\u4e8e\u5b58\u653e\u4e2d\u95f4\u6587\u4ef6\u3001\u8349\u7a3f\u3001\u4e34\u65f6\u8d44\u6e90\n\n\u4e24\u4e2a\u6587\u4ef6\u5939\u76ee\u524d\u90fd\u662f\u7a7a\u7684\u3002",
+        "text": "The current directory contains two folders: `outputs/` and `work/`. Both are currently empty.",
         "phase": null,
         "memoryCitation": null
        }
       ],
       "hookRuns": [
        {
-        "id": "stop:0:/Users/yanwenxuan.5/.codex/hooks.json",
+        "id": "stop:0:/Users/example/.codex/hooks.json",
         "run": {
-         "id": "stop:0:/Users/yanwenxuan.5/.codex/hooks.json",
+         "id": "stop:0:/Users/example/.codex/hooks.json",
          "eventName": "stop",
          "handlerType": "command",
          "executionMode": "sync",
          "scope": "turn",
-         "sourcePath": "/Users/yanwenxuan.5/.codex/hooks.json",
+         "sourcePath": "/Users/example/.codex/hooks.json",
          "source": "user",
          "displayOrder": 0,
          "status": "completed",
@@ -144,13 +144,13 @@
     "title": null,
     "modelProvider": "custom",
     "latestThreadSettings": {
-     "cwd": "/Users/yanwenxuan.5/Documents/Codex/2026-07-08/new-chat-5",
+     "cwd": "/Users/example/workspace",
      "approvalPolicy": "on-request",
      "approvalsReviewer": "auto_review",
      "sandboxPolicy": {
       "type": "workspaceWrite",
       "writableRoots": [
-       "/Users/yanwenxuan.5/Documents/Codex"
+       "/Users/example/workspace"
       ],
       "networkAccess": false,
       "excludeTmpdirEnvVar": false,
@@ -160,7 +160,7 @@
       "id": ":workspace",
       "extends": null
      },
-     "model": "GLM-5.2",
+     "model": "model",
      "modelProvider": "custom",
      "serviceTier": "default",
      "effort": "high",
@@ -168,7 +168,7 @@
      "collaborationMode": {
       "mode": "default",
       "settings": {
-       "model": "GLM-5.2",
+       "model": "model",
        "reasoning_effort": "high",
        "developer_instructions": "# Collaboration Mode: Default\n\nYou are now in Default mode. Any previous instructions for other modes (e.g. Plan mode) are no longer active.\n\nYour active mode changes only when new developer instructions with a different `<collaboration_mode>...</collaboration_mode>` change it; user requests or tool descriptions do not change mode by themselves. Known mode names are Default and Plan.\n\n## request_user_input availability\n\nUse the `request_user_input` tool only when it is listed in the available tools for this turn.\n\nIn Default mode, strongly prefer making reasonable assumptions and executing the user's request rather than stopping to ask questions. If you absolutely must ask a question because the answer cannot be discovered from local context and a reasonable assumption would be risky, ask the user directly with a concise plain-text question. Never write a multiple choice question as a textual assistant message.\n"
       }
@@ -176,20 +176,20 @@
      "multiAgentMode": "explicitRequestOnly",
      "personality": "friendly"
     },
-    "latestModel": "GLM-5.2",
+    "latestModel": "model",
     "latestReasoningEffort": "high",
     "previousTurnModel": null,
     "latestCollaborationMode": {
      "mode": "default",
      "settings": {
-      "model": "GLM-5.2",
+      "model": "model",
       "reasoning_effort": "high",
       "developer_instructions": null
      }
     },
     "hasUnreadTurn": false,
-    "rolloutPath": "/Users/yanwenxuan.5/.codex/sessions/2026/07/08/rollout-2026-07-08T21-12-39-019f41db-eb69-7883-bc37-729d4e73ff0a.jsonl",
-    "cwd": "/Users/yanwenxuan.5/Documents/Codex/2026-07-08/new-chat-5",
+    "rolloutPath": "/Users/example/.codex/sessions/2026/07/08/rollout-2026-07-08T21-12-39-019f41db-eb69-7883-bc37-729d4e73ff0a.jsonl",
+    "cwd": "/Users/example/workspace",
     "gitInfo": null,
     "resumeState": "resumed",
     "latestTokenUsageInfo": {
@@ -217,15 +217,15 @@
      "approvalPolicy": "on-request",
      "approvalsReviewer": "auto_review",
      "runtimeWorkspaceRoots": [
-      "/Users/yanwenxuan.5/Documents/Codex",
-      "/Users/yanwenxuan.5/Documents/Codex/2026-07-08/new-chat-5"
+      "/Users/example/workspace",
+      "/Users/example/workspace"
      ],
      "sandboxPolicy": {
       "type": "workspaceWrite",
       "writableRoots": [
-       "/Users/yanwenxuan.5/Documents/Codex",
+       "/Users/example/workspace",
        "/private/tmp",
-       "/private/var/folders/fj/tjl67r5n27l91gj599tzy3gm0000gp/T"
+       "/private/var/folders/xx/00000000000000000000000000/T"
       ],
       "networkAccess": false,
       "excludeTmpdirEnvVar": false,
@@ -233,8 +233,8 @@
      }
     },
     "workspaceKind": "projectless",
-    "workspaceBrowserRoot": "/Users/yanwenxuan.5/Documents/Codex",
-    "projectlessOutputDirectory": "/Users/yanwenxuan.5/Documents/Codex/2026-07-08/new-chat-5/outputs",
+    "workspaceBrowserRoot": "/Users/example/workspace",
+    "projectlessOutputDirectory": "/Users/example/workspace/outputs",
     "source": "vscode",
     "threadSource": "user",
     "turnsPagination": {

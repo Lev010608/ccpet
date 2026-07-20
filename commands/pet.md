@@ -1,6 +1,7 @@
 ---
 description: 控制 Claude Code 桌宠(列出/切换/开关宠物、授权终端跳转)
 allowed-tools: Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/ccpet-ctl.py":*)
+hide-from-slash-command-tool: "true"
 ---
 
 运行桌宠控制命令并把结果原样展示给用户。

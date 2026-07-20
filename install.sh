@@ -81,17 +81,68 @@ else
   say "有 $warn 项缺失(见上)。装好缺失项后再继续。"
 fi
 
+# ── 自动安装步骤 ─────────────────────────────────────────────────────────────
+
+CLAUDE_DIR="$HOME/.claude"
+SETTINGS="$CLAUDE_DIR/settings.json"
+
 say ""
-say "════════════ 安装步骤 ════════════"
-say "在 Claude Code 里依次运行:"
+say "════════════ 自动安装 ════════════"
+
+# 5. 注册 marketplace + 启用插件(写入 ~/.claude/settings.json)
 say ""
-say "  /plugin marketplace add $PLUGIN_DIR"
-say "  /plugin install ccpet@ccpet-marketplace"
+say "· 注册插件到 Claude Code settings..."
+python3 - "$SETTINGS" "$PLUGIN_DIR" <<'PYEOF'
+import sys, json, os
+
+settings_path = sys.argv[1]
+plugin_dir    = sys.argv[2]
+
+# 读取现有 settings(若不存在则创建)
+try:
+    with open(settings_path) as f:
+        cfg = json.load(f)
+except Exception:
+    cfg = {}
+
+# 注册 marketplace
+markets = cfg.setdefault("extraKnownMarketplaces", {})
+markets["ccpet-marketplace"] = {
+    "source": {"source": "directory", "path": plugin_dir}
+}
+
+# 启用插件
+enabled = cfg.setdefault("enabledPlugins", {})
+enabled["ccpet@ccpet-marketplace"] = True
+
+os.makedirs(os.path.dirname(settings_path), exist_ok=True)
+with open(settings_path, "w") as f:
+    json.dump(cfg, f, indent=2, ensure_ascii=False)
+    f.write("\n")
+
+print("  ✓ settings.json 已更新(marketplace + enabledPlugins)")
+PYEOF
+
+# 6. 安装 /pet 用户级命令(~/.claude/commands/pet.md)
+#    将插件命令里的 ${CLAUDE_PLUGIN_ROOT} 替换成本机实际路径,
+#    使 /pet 命令无需前缀直接可用。
 say ""
-say "装好后【重开一个会话】,桌宠会自动出现。常用命令:"
+say "· 安装 /pet 用户命令到 ~/.claude/commands/pet.md ..."
+COMMANDS_DIR="$CLAUDE_DIR/commands"
+mkdir -p "$COMMANDS_DIR"
+# 用 sed 将 ${CLAUDE_PLUGIN_ROOT} 替换为本机 PLUGIN_DIR
+sed "s|\${CLAUDE_PLUGIN_ROOT}|$PLUGIN_DIR|g" \
+    "$PLUGIN_DIR/commands/pet.md" \
+    > "$COMMANDS_DIR/pet.md"
+good "/pet 命令已安装(~/.claude/commands/pet.md)"
+say "    重开会话后可直接用 /pet 代替 /ccpet:pet"
+
+say ""
+say "════════════ 安装完成 ════════════"
+say "【重开一个 Claude Code 会话】即可使用。常用命令:"
 say "  /pet            列出可用宠物"
 say "  /pet use <名字>  换宠物"
 say "  /pet grant      授权 iTerm 精确聚焦(可选)"
 say "  /pet quit       关闭桌宠(不自动重开,/pet on 恢复)"
 say ""
-say "可写状态存在 ~/.ccpet/(config、编译的二进制、state);卸载后 rm -rf ~/.ccpet 清理干净。"
+say "可写状态存在 ~/.ccpet/;卸载后 rm -rf ~/.ccpet && rm ~/.claude/commands/pet.md 清理干净。"
